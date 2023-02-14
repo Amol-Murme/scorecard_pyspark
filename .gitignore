@@ -1,0 +1,5 @@
+/.env
+/.pytest_cache
+/.vscode
+/__pycache__
+/sample_py_df.csv
