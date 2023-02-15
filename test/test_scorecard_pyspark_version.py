@@ -1,5 +1,6 @@
 
 import pandas as pd
+from pandas.testing import assert_frame_equal
 import numpy as np
 import pytest
 import warnings
@@ -16,6 +17,11 @@ def spark():
     spark = SparkSession.builder.appName("check_empty_bins_test").getOrCreate()
     yield spark
     spark.stop()
+
+@pytest.fixture
+def example_data():
+    
+    yield dtm
 
 def test_miv_01():
     # Create a test dataframe
@@ -147,7 +153,6 @@ def test_x_variable():
     # Create a sample dataframe
     data = {
         'y1': [1, 2, 3, 4, 5],
-        'y2': [6, 7, 8, 9, 10],
         'x1': [11, 12, 13, 14, 15],
         'x2': [16, 17, 18, 19, 20],
         'x3': [21, 22, 23, 24, 25]
@@ -157,7 +162,7 @@ def test_x_variable():
     # Test the x_variable function with x set to None
     with warnings.catch_warnings(record=True) as w:
         result = x_variable(df, 'y1', None)
-        assert set(result) == set(['x1','y2','x2', 'x3'])
+        assert set(result) == set(['x1','x2', 'x3'])
         assert len(w) == 0
 
     # Test the x_variable function with x set to a list
@@ -168,8 +173,8 @@ def test_x_variable():
 
     # Test the x_variable function with x containing incorrect inputs
     with warnings.catch_warnings(record=True) as w:
-        result = x_variable(df, 'y1', x='dummy')
-        assert set(result) == set(['x1', 'x2', 'x3','y2'])
+        result = x_variable(df, 'y1', x=['x1','x2','x3','x4'])
+        assert set(result) == set(['x1', 'x2', 'x3'])
         assert len(w) == 1
         assert str(w[0].message) == 'Incorrect inputs; there are 1 x variables are not exist in input data, which are removed from x. \n(x4)'
 
@@ -178,3 +183,68 @@ def test_x_variable():
         result = x_variable(df, 'y1', 'x1', 'x2')
         assert result == ['x1']
         assert len(w) == 0
+
+def test_woebin2_init_bin():
+    spark = SparkSession.builder.appName("woebin-test").getOrCreate()
+
+    # create test data
+    data = pd.DataFrame({'variable': "M97",
+                         'value': [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.2, 1.3, 1.4, 1.5, 1.6, 1.7, 1.8, 1.9, 2.0],
+                         'y': [0, 0, 0, 1, 1, 0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 0, 1, 0, 0, 1]})
+
+    dtm = spark.createDataFrame(data)
+
+    # test the function
+    result = woebin2_init_bin(dtm, 0.1,breaks=None,spl_val=None)
+
+    # check the output
+    assert set(result.keys()) == {'initial_binning'}
+    assert len(result['initial_binning']) == 6
+    assert result['initial_binning']['variable'][0] == 'M97'
+    assert result['initial_binning']['bin'].tolist() == ['[-inf,0.6000000000000001)', '[0.6000000000000001,1.0)', '[1.0,1.2000000000000002)', '[1.2000000000000002,1.6)','[1.6,1.8)', '[1.8,inf)']
+    assert np.allclose(result['initial_binning']['good'].tolist(), [4,2,2,2,1,2], atol=1e-6)
+    assert np.allclose(result['initial_binning']['bad'].tolist(), [2,1,1,1,1,1], atol=1e-6)
+    assert np.allclose(result['initial_binning']['badprob'].tolist(), [0.3333,0.3333,0.3333,0.3333,0.5,0.3333], atol=1e-3)
+
+def test_str_to_list_with_string():
+    assert str_to_list("hello") == ["hello"]
+
+def test_str_to_list_with_list():
+    assert str_to_list([1, 2, 3]) == [1, 2, 3]
+
+def test_str_to_list_with_none():
+    assert str_to_list(None) == None
+
+def test_str_to_list_with_non_string():
+    assert str_to_list(123) == 123
+
+def test_str_to_list_with_empty_string():
+    assert str_to_list("") == [""]
+
+def test_str_to_list_with_boolean():
+    assert str_to_list(True) == True
+
+def test_str_to_list_with_float():
+    assert str_to_list(3.14) == 3.14
+
+def test_woebin2_chimerge(spark):
+    init_count_distr = 0.02
+    count_distr_limit = 0.05
+    stop_limit = 0.1
+    bin_num_limit = 8
+    breaks = None
+    spl_val = None 
+    # prepare input data
+    data = pd.read_csv('sample_py_df.csv',usecols=['M97','def_trig'])
+    data.rename(columns={'M97':'value','def_trig':'y'},inplace=True)
+    data['variable'] = 'M97'
+    dtm = spark.createDataFrame(data)
+    expected_result = pd.read_csv('chimerged_output_for_test.csv')
+
+    result = woebin2_chimerge(dtm, init_count_distr=init_count_distr, 
+                              count_distr_limit=count_distr_limit, stop_limit=stop_limit, 
+                              bin_num_limit=bin_num_limit, breaks=breaks, spl_val=spl_val)
+    expected_result.drop('variable',axis=1,inplace=True)
+    result['binning'].drop('variable',axis=1,inplace=True)
+    assert_frame_equal(expected_result, result['binning'],check_dtype=False)
+    
