@@ -248,3 +248,23 @@ def test_woebin2_chimerge(spark):
     result['binning'].drop('variable',axis=1,inplace=True)
     assert_frame_equal(expected_result, result['binning'],check_dtype=False)
     
+def test_woebin2_breaks():
+    spark = SparkSession.builder.appName("woebin-test").getOrCreate()
+
+    # create test data
+    data = pd.DataFrame({'variable': "M97",
+                         'value': [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.2, 1.3, 1.4, 1.5, 1.6, 1.7, 1.8, 1.9, 2.0],
+                         'y': [0, 0, 0, 1, 1, 0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 0, 1, 0, 0, 1]})
+
+    dtm = spark.createDataFrame(data)
+
+    # test the function
+    result = woebin2_breaks(dtm, brk=[0.5,1.0,1.5,2.0],spl_val=None)
+
+    # check the output
+    assert set(result.keys()) == {'initial_binning'}
+    assert len(result['initial_binning']) == 5
+    assert result['initial_binning']['variable'][0] == 'M97'
+    assert result['initial_binning']['bin'].tolist() == ['[-inf,0.5)', '[0.5,1.0)', '[1.0,1.5)', '[1.5,2.0)','[2.0,inf)']
+    assert np.allclose(result['initial_binning']['good'].tolist(), [3,3,3,4,0], atol=1e-6)
+    assert np.allclose(result['initial_binning']['bad'].tolist(), [1,2,2,1,1], atol=1e-6)

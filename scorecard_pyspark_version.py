@@ -127,6 +127,45 @@ def woebin2_init_bin(dtm, init_count_distr:float, breaks:List[float], spl_val:Li
     # return 
     return {'initial_binning':init_bin}
 
+def woebin2_breaks(dtm, brk, spl_val):
+    brk = [float('-inf')] + sorted(brk) + [float('inf')]
+    # initial binning datatable
+    # cut
+    labels:List[str] = ['[{},{})'.format(brk[i], brk[i+1]) for i in range(len(brk)-1)]
+    bucketizer = Bucketizer(splits=brk,inputCol="value", outputCol="bin")
+    df_buck = bucketizer.setHandleInvalid("keep").transform(dtm)
+
+    label_array = array(*(lit(label) for label in labels))
+    df_buck = df_buck.withColumn("bin", label_array.getItem(col("bin").cast("integer")))
+    
+    init_bin = df_buck.groupby('bin').pivot("y").count()
+
+
+    # check empty bins for unmeric variable
+    init_bin = check_empty_bins(df_buck,init_bin)
+    init_bin = init_bin.withColumn('order', split(init_bin['bins'], ',').getItem(0))
+    init_bin = init_bin.withColumn('order', split(init_bin['order'], '\[').getItem(1).cast('Float'))
+    init_bin = init_bin.sort('order')
+    init_bin = init_bin.drop('order')
+    init_bin:pd.DataFrame = init_bin.toPandas()
+    init_bin.rename(columns={'0':'good','1':'bad'},inplace=True)
+    init_bin.fillna(0,inplace=True)
+    init_bin = init_bin.assign(
+      variable = df_buck.select('variable').collect()[0][0], #! time can be reduced here
+      brkp = lambda x: [float(re.match('^\[(.*),.+', i).group(1)) for i in x['bins']],
+      badprob = lambda x: x['bad']/(x['bad']+x['good'])
+    )[['variable', 'bins', 'brkp', 'good', 'bad', 'badprob']]
+
+    init_bin = init_bin.fillna(0)
+    # format init_bin
+    if ((dict(dtm.dtypes)['value'] == "double") or (dict(dtm.dtypes)['value'] == "int")):
+        init_bin = init_bin\
+        .assign(bin = lambda x: [re.sub(r'(?<=,).+%,%.+,', '', i) if ('%,%' in i) else i for i in x['bins']])\
+        .assign(brkp = lambda x: [float(re.match('^\[(.*),.+', i).group(1)) for i in x['bin']])
+    init_bin.drop('bins',axis=1,inplace=True)
+    # return 
+    return {'initial_binning':init_bin}
+
 def pretty(low:float, high:float, n:int) -> np.ndarray:
     '''
     pretty breakpoints, the same as pretty function in R
@@ -264,22 +303,16 @@ def woebin2(dtm, breaks=None, spl_val=None,
     # binning
     if breaks is not None:
         # 1.return binning if breaks provided
-        bin_list = woebin2_breaks(dtm=dtm, breaks=breaks, spl_val=spl_val)
+        bin_list = woebin2_breaks(dtm=dtm, brk=breaks, spl_val=spl_val)
     else:
         if stop_limit == 'N':
             # binning of initial & specialvalues
             bin_list = woebin2_init_bin(dtm, init_count_distr=init_count_distr, breaks=breaks, spl_val=spl_val)
-        else:
-            if method == 'tree':
-                # 2.tree-like optimal binning
-                bin_list = woebin2_tree(
-                  dtm, init_count_distr=init_count_distr, count_distr_limit=count_distr_limit, 
-                  stop_limit=stop_limit, bin_num_limit=bin_num_limit, breaks=breaks, spl_val=spl_val)
-            elif method == "chimerge":
-                # 2.chimerge optimal binning
-                bin_list = woebin2_chimerge(
-                  dtm, init_count_distr=init_count_distr, count_distr_limit=count_distr_limit, 
-                  stop_limit=stop_limit, bin_num_limit=bin_num_limit, breaks=breaks, spl_val=spl_val)
+        else:     
+              # 2.chimerge optimal binning
+              bin_list = woebin2_chimerge(
+                dtm, init_count_distr=init_count_distr, count_distr_limit=count_distr_limit, 
+                stop_limit=stop_limit, bin_num_limit=bin_num_limit, breaks=breaks, spl_val=spl_val)
     # rbind binning_sv and binning
     binning = pd.concat(bin_list, keys=bin_list.keys()).reset_index()\
               .assign(is_sv = lambda x: x.level_0 =='binning_sv')
@@ -642,19 +675,22 @@ if __name__ == '__main__':
         .config("spark.memory.offHeap.size","4g") .getOrCreate()
     spark.conf.set("spark.sql.execution.arrow.pyspark.enabled", "true")
 
-    df = spark.read.csv("sample_py_df.csv",sep=",", header=True, inferSchema=True)
-    df = df.select("M97","def_trig")
+    # df = spark.read.csv("sample_py_df.csv",sep=",", header=True, inferSchema=True)
+    # df = df.select("M97","def_trig")
+    data = pd.DataFrame({'M97': [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.2, 1.3, 1.4, 1.5, 1.6, 1.7, 1.8, 1.9, 2.0],
+                         'def_trig': [0, 0, 0, 1, 1, 0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 0, 1, 0, 0, 1]})
+    df = spark.createDataFrame(data)
     # print(len(df.columns),df.columns)
     #df = df.drop('Date.1','dummylockdown')
     # print(len(df.columns),df.columns)
-    bins = woebin(df,y='def_trig',method='chimerge')
+    bins = woebin(df,y='def_trig',method='chimerge',breaks_list={'M97':[0.5,1.0,1.5,2.0]})
 
     bins['M97'].drop('variable',axis=1,inplace=True)
     # bins['M98'].drop('variable',axis=1,inplace=True)
     # bins['M100'].drop('variable',axis=1,inplace=True)
 
     iv = []
-    print(bins['M97']['bin'])
+    print(bins['M97'])
     # print(bins['M98']['bin'])
     # print(bins['M100']['bin'])
 
